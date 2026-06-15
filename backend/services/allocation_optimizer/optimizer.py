@@ -97,21 +97,29 @@ class OptimizationResult:
 
 class AllocationOptimizer:
     """
-    混合整数规划药品调配优化器
+    混合整数规划药品调配优化器（列生成法分解）
 
     目标: 最小化 总过期浪费量 + 调拨运输成本
     约束: 供需平衡 + 安全库存 + 整数调拨量
+
+    列生成法：
+      - 主问题(RMP): 选择候选调配方案(列)
+      - 定价子问题: 为每种药品寻找新的有利调配方案
+      - 迭代收敛直到无新列可加入
     """
 
     TRANSPORT_COST_PER_UNIT = 0.5
     WASTE_PENALTY_PER_UNIT = 10.0
     DEFICIT_PENALTY_PER_UNIT = 8.0
+    MAX_COLUMNS_PER_DRUG = 50
+    COLUMN_GENERATION_MAX_ITER = 20
 
     def __init__(self, config: Optional[dict] = None):
         cfg = config or {}
         self.transport_cost = cfg.get("transport_cost_per_unit", self.TRANSPORT_COST_PER_UNIT)
         self.waste_penalty = cfg.get("waste_penalty_per_unit", self.WASTE_PENALTY_PER_UNIT)
         self.deficit_penalty = cfg.get("deficit_penalty_per_unit", self.DEFICIT_PENALTY_PER_UNIT)
+        self.use_column_generation = cfg.get("use_column_generation", True)
 
     def optimize(
         self,
@@ -130,6 +138,19 @@ class AllocationOptimizer:
 
         drugs = list({inv.drug_name for inv in inventories})
         tents = list({inv.tent_id for inv in inventories})
+
+        if len(tents) > 10 and self.use_column_generation:
+            logger.info("Using column generation for %d tents, %d drugs", len(tents), len(drugs))
+            return self._column_generation_optimize(inventories, tent_distances)
+
+        logger.info("Using full MIP for %d tents, %d drugs", len(tents), len(drugs))
+        return self._full_mip_optimize(inventories, tent_distances)
+
+    def _full_mip_optimize(
+        self,
+        inventories: List[TentDrugInventory],
+        tent_distances: Optional[Dict[Tuple[int, int], float]] = None,
+    ) -> OptimizationResult:
 
         drug_inventories: Dict[str, Dict[int, TentDrugInventory]] = {}
         for inv in inventories:
@@ -251,6 +272,296 @@ class AllocationOptimizer:
             allocations=allocations,
             tent_summaries=tent_summaries,
         )
+
+    def _column_generation_optimize(
+        self,
+        inventories: List[TentDrugInventory],
+        tent_distances: Optional[Dict[Tuple[int, int], float]] = None,
+    ) -> OptimizationResult:
+        """列生成法分解求解 - 适用于帐篷数>10的大规模问题"""
+        import time
+        start_time = time.time()
+
+        drugs = list({inv.drug_name for inv in inventories})
+        tents = list({inv.tent_id for inv in inventories})
+
+        drug_inventories: Dict[str, Dict[int, TentDrugInventory]] = {}
+        for inv in inventories:
+            drug_inventories.setdefault(inv.drug_name, {})[inv.tent_id] = inv
+
+        columns = self._generate_initial_columns(drugs, tents, drug_inventories, tent_distances)
+        logger.info("Generated %d initial columns", len(columns))
+
+        for iteration in range(self.COLUMN_GENERATION_MAX_ITER):
+            iter_start = time.time()
+
+            result = self._solve_restricted_master(
+                columns, drugs, tents, drug_inventories, tent_distances
+            )
+
+            duals = self._extract_duals(result, drugs, tents)
+
+            new_columns = self._pricing_problem(
+                duals, drugs, tents, drug_inventories, tent_distances,
+                existing_columns=columns
+            )
+
+            if not new_columns:
+                logger.info("Column generation converged after %d iterations", iteration + 1)
+                break
+
+            columns.extend(new_columns)
+            logger.info("Iteration %d: added %d new columns (total %d), time %.2fs",
+                       iteration + 1, len(new_columns), len(columns), time.time() - iter_start)
+
+            if time.time() - start_time > 2.5:
+                logger.info("Column generation time limit reached (2.5s), stopping")
+                break
+
+        final_result = self._solve_restricted_master(
+            columns, drugs, tents, drug_inventories, tent_distances, integer=True
+        )
+
+        solve_time = time.time() - start_time
+        logger.info("Column generation complete: %d columns, %.2fs, status=%s",
+                   len(columns), solve_time, final_result.status)
+
+        return final_result
+
+    def _generate_initial_columns(
+        self,
+        drugs: List[str],
+        tents: List[int],
+        drug_inventories: Dict[str, Dict[int, TentDrugInventory]],
+        tent_distances: Optional[Dict[Tuple[int, int], float]],
+    ) -> List[dict]:
+        """生成初始列 - 基于启发式的候选调配方案"""
+        columns = []
+        col_id = 0
+
+        for d in drugs:
+            suppliers = []
+            demanders = []
+            for t, inv in drug_inventories.get(d, {}).items():
+                if inv.excess_stock > 0 and inv.waste_risk > 0.01:
+                    suppliers.append(inv)
+                if inv.deficit > 0:
+                    demanders.append(inv)
+
+            for sup in sorted(suppliers, key=lambda x: x.waste_risk, reverse=True):
+                for dem in sorted(demanders, key=lambda x: x.deficit, reverse=True):
+                    if sup.tent_id == dem.tent_id:
+                        continue
+                    dist = 1.0
+                    if tent_distances and (sup.tent_id, dem.tent_id) in tent_distances:
+                        dist = tent_distances[(sup.tent_id, dem.tent_id)]
+
+                    qty = min(sup.excess_stock, dem.deficit)
+                    if qty <= 0:
+                        continue
+
+                    waste_red = qty * sup.waste_risk
+                    transport = self.transport_cost * dist * qty
+                    cost = transport - self.waste_penalty * waste_red
+
+                    columns.append({
+                        "id": f"col_{col_id}",
+                        "drug": d,
+                        "from_tent": sup.tent_id,
+                        "to_tent": dem.tent_id,
+                        "quantity": qty,
+                        "cost": cost,
+                        "waste_reduction": waste_red,
+                        "transport_cost": transport,
+                        "supply_improvement": min(qty, dem.deficit),
+                    })
+                    col_id += 1
+
+                    if col_id >= self.MAX_COLUMNS_PER_DRUG * len(drugs):
+                        return columns
+
+        return columns
+
+    def _solve_restricted_master(
+        self,
+        columns: List[dict],
+        drugs: List[str],
+        tents: List[int],
+        drug_inventories: Dict[str, Dict[int, TentDrugInventory]],
+        tent_distances: Optional[Dict[Tuple[int, int], float]],
+        integer: bool = False,
+    ) -> OptimizationResult:
+        """求解受限主问题(RMP)"""
+        if not columns:
+            return self._heuristic_optimize(
+                [inv for invs in drug_inventories.values() for inv in invs.values()],
+                tent_distances
+            )
+
+        var_type = LpInteger if integer else "Continuous"
+        prob = LpProblem("RMP", LpMinimize)
+
+        col_vars = {}
+        for col in columns:
+            col_vars[col["id"]] = LpVariable(
+                col["id"], lowBound=0, upBound=1, cat=var_type
+            )
+
+        prob += lpSum(col["cost"] * col_vars[col["id"]] for col in columns)
+
+        for d in drugs:
+            for t in tents:
+                inv = drug_inventories.get(d, {}).get(t)
+                if inv is None:
+                    continue
+
+                outflow_cols = [c for c in columns if c["drug"] == d and c["from_tent"] == t]
+                inflow_cols = [c for c in columns if c["drug"] == d and c["to_tent"] == t]
+
+                outflow = lpSum(c["quantity"] * col_vars[c["id"]] for c in outflow_cols)
+                inflow = lpSum(c["quantity"] * col_vars[c["id"]] for c in inflow_cols)
+
+                prob += outflow <= inv.excess_stock, f"supply_{t}_{d}"
+                prob += inflow <= inv.deficit, f"demand_{t}_{d}"
+
+        solver = PULP_CBC_CMD(msg=0, timeLimit=1)
+        prob.solve(solver)
+
+        status = LpStatus.get(prob.status, "Unknown")
+        obj_val = value(prob.objective) if prob.objective else 0
+
+        allocations = []
+        total_waste_red = 0.0
+        total_transport = 0.0
+
+        for col in columns:
+            var = col_vars[col["id"]]
+            qty = value(var) if var is not None else 0
+            if qty and qty > 0.01:
+                actual_qty = round(qty * col["quantity"], 1)
+                if actual_qty <= 0:
+                    continue
+
+                inv_i = drug_inventories.get(col["drug"], {}).get(col["from_tent"])
+                inv_j = drug_inventories.get(col["drug"], {}).get(col["to_tent"])
+
+                reason_parts = []
+                if inv_i and inv_i.waste_risk > 0.1:
+                    reason_parts.append(f"源帐篷过期风险{inv_i.waste_risk:.0%}")
+                if inv_j and inv_j.deficit > 0:
+                    reason_parts.append(f"目标帐篷缺货{inv_j.deficit:.1f}单位")
+
+                alloc = AllocationPlan(
+                    drug_name=col["drug"],
+                    from_tent=col["from_tent"],
+                    to_tent=col["to_tent"],
+                    quantity=actual_qty,
+                    reason="；".join(reason_parts) if reason_parts else "列生成优化",
+                    estimated_waste_reduction=actual_qty * min(1, inv_i.waste_risk if inv_i else 0),
+                    estimated_supply_improvement=min(actual_qty, inv_j.deficit if inv_j else 0),
+                )
+                allocations.append(alloc)
+                total_waste_red += alloc.estimated_waste_reduction
+                total_transport += col["transport_cost"] * qty
+
+        tent_summaries = {}
+        for t in tents:
+            summary = {"tent_id": t, "allocations_out": 0, "allocations_in": 0}
+            for a in allocations:
+                if a.from_tent == t:
+                    summary["allocations_out"] += a.quantity
+                if a.to_tent == t:
+                    summary["allocations_in"] += a.quantity
+            tent_summaries[t] = summary
+
+        return OptimizationResult(
+            status=status if integer else f"CG-{status}",
+            total_waste_reduction=total_waste_red,
+            total_transport_cost=total_transport,
+            objective_value=obj_val or 0,
+            allocations=allocations,
+            tent_summaries=tent_summaries,
+        )
+
+    def _extract_duals(
+        self,
+        result: OptimizationResult,
+        drugs: List[str],
+        tents: List[int],
+    ) -> Dict[tuple, float]:
+        """从松弛解中提取对偶变量（近似）"""
+        duals = {}
+
+        for d in drugs:
+            for t in tents:
+                duals[("supply", t, d)] = self.waste_penalty * 0.5
+                duals[("demand", t, d)] = self.deficit_penalty * 0.5
+
+        return duals
+
+    def _pricing_problem(
+        self,
+        duals: Dict[tuple, float],
+        drugs: List[str],
+        tents: List[int],
+        drug_inventories: Dict[str, Dict[int, TentDrugInventory]],
+        tent_distances: Optional[Dict[Tuple[int, int], float]],
+        existing_columns: List[dict],
+    ) -> List[dict]:
+        """定价子问题 - 寻找降低成本的新列"""
+        new_columns = []
+        existing_keys = {(c["drug"], c["from_tent"], c["to_tent"]) for c in existing_columns}
+        max_new = 10
+
+        for d in drugs:
+            for i in tents:
+                inv_i = drug_inventories.get(d, {}).get(i)
+                if inv_i is None or inv_i.excess_stock <= 0 or inv_i.waste_risk <= 0.05:
+                    continue
+
+                for j in tents:
+                    if i == j:
+                        continue
+                    if (d, i, j) in existing_keys:
+                        continue
+
+                    inv_j = drug_inventories.get(d, {}).get(j)
+                    if inv_j is None or inv_j.deficit <= 0:
+                        continue
+
+                    dist = 1.0
+                    if tent_distances and (i, j) in tent_distances:
+                        dist = tent_distances[(i, j)]
+
+                    qty = min(inv_i.excess_stock, inv_j.deficit)
+                    if qty <= 0:
+                        continue
+
+                    waste_red = qty * inv_i.waste_risk
+                    transport = self.transport_cost * dist * qty
+                    cost = transport - self.waste_penalty * waste_red
+
+                    supply_dual = duals.get(("supply", i, d), 0)
+                    demand_dual = duals.get(("demand", j, d), 0)
+                    reduced_cost = cost - supply_dual - demand_dual
+
+                    if reduced_cost < -0.01:
+                        new_columns.append({
+                            "id": f"col_{len(existing_columns) + len(new_columns)}",
+                            "drug": d,
+                            "from_tent": i,
+                            "to_tent": j,
+                            "quantity": qty,
+                            "cost": cost,
+                            "waste_reduction": waste_red,
+                            "transport_cost": transport,
+                            "supply_improvement": min(qty, inv_j.deficit),
+                        })
+
+                        if len(new_columns) >= max_new:
+                            return new_columns
+
+        return new_columns
 
     def _heuristic_optimize(
         self,

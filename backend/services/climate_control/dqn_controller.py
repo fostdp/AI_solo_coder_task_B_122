@@ -125,6 +125,25 @@ class TentClimateSimulator:
         )
         return self.current
 
+    def potential(self, state: Optional[ClimateState] = None) -> float:
+        """
+        势能函数 Φ(s) - 衡量状态距离理想状态的"潜力"
+        用于潜力塑形奖励，范围 [0, 1]，越大越接近理想状态
+        """
+        s = state or self.current
+        temp_dev = abs(s.temperature - self.IDEAL_TEMP) / 20.0
+        hum_dev = abs(s.humidity - self.IDEAL_HUMIDITY) / 40.0
+        aw_dev = abs(s.aw - self.IDEAL_AW) / 0.4
+        light_dev = abs(s.light - 300.0) / 700.0
+
+        score = (
+            max(0, 1 - temp_dev) * 0.4
+            + max(0, 1 - hum_dev) * 0.3
+            + max(0, 1 - aw_dev) * 0.2
+            + max(0, 1 - light_dev) * 0.1
+        )
+        return max(0.0, min(1.0, score))
+
     def step(self, action: ControlAction, dt_hours: float = 1.0) -> Tuple[ClimateState, float]:
         temp = self.current.temperature
         humidity = self.current.humidity
@@ -264,6 +283,7 @@ class DQNAgent:
         simulator: TentClimateSimulator,
         episodes: int = 200,
         max_steps: int = 48,
+        use_potential_shaping: bool = True,
     ) -> Dict[str, List[float]]:
         rewards_history = []
         losses = []
@@ -277,11 +297,20 @@ class DQNAgent:
                 action_idx = self.select_action(state_arr, training=True)
                 action = ControlAction.from_index(action_idx)
 
+                if use_potential_shaping:
+                    phi_s = simulator.potential(state)
+
                 next_state, reward = simulator.step(action, dt_hours=1.0)
                 next_arr = next_state.to_array()
                 done = step >= max_steps - 1
 
-                self.store_transition(state_arr, action_idx, reward, next_arr, done)
+                if use_potential_shaping:
+                    phi_s_prime = simulator.potential(next_state)
+                    shaped_reward = reward + self.gamma * phi_s_prime - phi_s
+                else:
+                    shaped_reward = reward
+
+                self.store_transition(state_arr, action_idx, shaped_reward, next_arr, done)
                 loss = self.train_step()
 
                 total_reward += reward

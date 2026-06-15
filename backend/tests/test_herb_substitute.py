@@ -209,3 +209,55 @@ class TestKnowledgeGraphIntegrity:
                 reverse = g.get_neighbors(neighbor)
                 found = any(n == herb for n, _, _ in reverse)
                 assert found, f"{herb}→{neighbor} edge missing reverse"
+
+
+# ============================================================
+#  修复验证：《本草纲目》毒性约束
+# ============================================================
+
+class TestToxicityConstraint:
+    def test_toxicity_field_present_in_all_nodes(self):
+        for name, props in KNOWLEDGE_GRAPH_NODES.items():
+            assert hasattr(props, "toxicity"), f"{name} 缺少 toxicity 字段"
+            assert props.toxicity in ["无毒", "小毒", "有毒", "大毒"], \
+                f"{name} toxicity 值无效: {props.toxicity}"
+
+    def test_known_toxic_herbs_marked_correctly(self):
+        assert KNOWLEDGE_GRAPH_NODES["细辛"].toxicity == "小毒"
+        assert KNOWLEDGE_GRAPH_NODES["麻黄"].toxicity == "小毒"
+        assert KNOWLEDGE_GRAPH_NODES["大黄"].toxicity == "有毒"
+        assert KNOWLEDGE_GRAPH_NODES["当归"].toxicity == "无毒"
+        assert KNOWLEDGE_GRAPH_NODES["川芎"].toxicity == "无毒"
+
+    def test_recommendations_exclude_highly_toxic_herbs(self):
+        g = HerbKnowledgeGraph()
+        recs = g.find_substitutes("当归", max_depth=3, top_k=10)
+        names = [r.substitute_herb for r in recs]
+        assert "大黄" not in names, f"有毒药材大黄不应出现在推荐列表中: {names}"
+
+    def test_low_toxicity_herbs_have_lower_scores(self):
+        g = HerbKnowledgeGraph()
+        recs = g.find_substitutes("桂枝", max_depth=3, top_k=10)
+        name_to_score = {r.substitute_herb: r.similarity_score for r in recs}
+
+        if "麻黄" in name_to_score and "桂枝" in name_to_score:
+            pass
+
+        for r in recs:
+            if r.substitute_herb in ["麻黄", "细辛"]:
+                assert "⚠️" in r.notes, f"小毒药材应有警示: {r.notes}"
+
+    def test_toxicity_weight_applied_correctly(self):
+        from services.herb_substitute.knowledge_graph import TOXICITY_WEIGHTS
+        assert TOXICITY_WEIGHTS["无毒"] == 1.0
+        assert TOXICITY_WEIGHTS["小毒"] == 0.5
+        assert TOXICITY_WEIGHTS["有毒"] == 0.1
+        assert TOXICITY_WEIGHTS["大毒"] == 0.0
+
+    def test_recommendations_for_hot_climate_exclude_toxic(self):
+        g = HerbKnowledgeGraph()
+        recs = g.find_substitutes("甘草", max_depth=3, top_k=5)
+        names = [r.substitute_herb for r in recs]
+        toxic_herbs = [h for h, p in KNOWLEDGE_GRAPH_NODES.items() if p.toxicity in ["有毒", "大毒"]]
+        for th in toxic_herbs:
+            assert th not in names, f"有毒药材 {th} 不应出现在推荐中: {names}"

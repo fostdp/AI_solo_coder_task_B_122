@@ -263,3 +263,59 @@ class TestAllocationService:
         tents = [{"id": 1, "lat": 40.0, "lng": 94.0}, {"id": 2, "lat": 40.0, "lng": 94.0}]
         dists = svc.get_tent_distances(tents)
         assert dists[(1, 2)] < 1.0
+
+
+# ============================================================
+#  修复验证：列生成法求解性能
+# ============================================================
+
+class TestColumnGenerationPerformance:
+    def test_12_tents_solves_under_3_seconds(self):
+        import time
+        invs = []
+        drugs = ["当归", "大黄", "甘草", "黄芪", "白术"]
+        for tent_id in range(1, 13):
+            for drug in drugs:
+                if tent_id <= 6:
+                    invs.append(TentDrugInventory(
+                        tent_id=tent_id, drug_name=drug,
+                        current_stock=200 + tent_id * 5,
+                        daily_consumption=2.0,
+                        shelf_life_days=10 + tent_id,
+                        safety_stock_days=7,
+                    ))
+                else:
+                    invs.append(TentDrugInventory(
+                        tent_id=tent_id, drug_name=drug,
+                        current_stock=10 + tent_id,
+                        daily_consumption=3.0,
+                        shelf_life_days=365,
+                        safety_stock_days=7,
+                    ))
+
+        opt = AllocationOptimizer()
+        start = time.time()
+        result = opt.optimize(invs)
+        solve_time = time.time() - start
+
+        assert solve_time < 3.0, f"12帐篷求解时间 {solve_time:.2f}s > 3s"
+        assert result.status in ["Optimal", "heuristic"] or result.status.startswith("CG-"), \
+            f"状态应为Optimal/CG-*/heuristic，实际: {result.status}"
+        assert len(result.allocations) > 0
+        assert result.total_waste_reduction > 0
+
+    def test_column_generation_vs_full_mip_small_case(self):
+        invs = [
+            TentDrugInventory(1, "当归", 200, 2.0, 15, 7),
+            TentDrugInventory(2, "当归", 20, 3.0, 365, 7),
+            TentDrugInventory(3, "当归", 50, 2.0, 180, 7),
+        ]
+
+        opt_cg = AllocationOptimizer({"use_column_generation": True})
+        opt_full = AllocationOptimizer({"use_column_generation": False})
+
+        result_cg = opt_cg.optimize(invs)
+        result_full = opt_full.optimize(invs)
+
+        assert result_cg.total_waste_reduction >= result_full.total_waste_reduction * 0.8
+        assert result_cg.allocations[0].quantity > 0

@@ -252,3 +252,127 @@ class TestDQNAgent:
             agent.train_step()
             state = ns
         assert agent.epsilon < 1.0
+
+
+# ============================================================
+#  修复验证：潜力塑形奖励稳定性
+# ============================================================
+
+class TestPotentialShapingStability:
+    def test_potential_function_range(self):
+        sim = TentClimateSimulator()
+        states = [
+            ClimateState(20, 50, 300, 0.45, 0, 0, 0),
+            ClimateState(35, 80, 800, 0.7, 0, 0, 0),
+            ClimateState(0, 20, 0, 0.3, 0, 0, 0),
+            ClimateState(50, 99, 1000, 0.95, 2, 1, 1),
+        ]
+        for s in states:
+            phi = sim.potential(s)
+            assert 0.0 <= phi <= 1.0, f"potential {phi} 超出 [0,1] 范围"
+
+    def test_ideal_state_has_max_potential(self):
+        sim = TentClimateSimulator()
+        ideal = ClimateState(20, 50, 300, 0.45, 0, 0, 0)
+        bad = ClimateState(35, 80, 800, 0.7, 0, 0, 0)
+        assert sim.potential(ideal) > sim.potential(bad)
+
+    def test_potential_shaping_reward_improves_convergence(self):
+        agent_shaped = DQNAgent(epsilon_decay=0.99, batch_size=16, lr=0.01)
+        agent_vanilla = DQNAgent(epsilon_decay=0.99, batch_size=16, lr=0.01)
+        sim = TentClimateSimulator({"temperature": 32, "humidity": 70, "light": 600, "aw": 0.6})
+
+        result_shaped = agent_shaped.train_episodes(sim, episodes=30, max_steps=24, use_potential_shaping=True)
+        result_vanilla = agent_vanilla.train_episodes(sim, episodes=30, max_steps=24, use_potential_shaping=False)
+
+        rewards_shaped = result_shaped["rewards"]
+        rewards_vanilla = result_vanilla["rewards"]
+
+        last_10_shaped = sum(rewards_shaped[-10:]) / 10
+        last_10_vanilla = sum(rewards_vanilla[-10:]) / 10
+        first_10_shaped = sum(rewards_shaped[:10]) / 10
+        first_10_vanilla = sum(rewards_vanilla[:10]) / 10
+
+        improvement_shaped = last_10_shaped - first_10_shaped
+        improvement_vanilla = last_10_vanilla - first_10_vanilla
+
+        if improvement_vanilla > 0:
+            assert improvement_shaped >= improvement_vanilla * 0.5, \
+                f"塑形奖励改善 {improvement_shaped:.2f} 应不低于原始 {improvement_vanilla:.2f} 的50%"
+        else:
+            assert improvement_shaped >= improvement_vanilla - 0.5, \
+                f"塑形奖励改善 {improvement_shaped:.2f} 不应差于原始 {improvement_vanilla:.2f} 太多"
+
+    def test_1000_steps_stable_control(self):
+        agent = DQNAgent(epsilon_decay=0.995, batch_size=32, gamma=0.95)
+        sim = TentClimateSimulator({"temperature": 35, "humidity": 75, "light": 700, "aw": 0.65})
+
+        total_steps = 0
+        state = sim.reset()
+        temp_history = []
+
+        for ep in range(42):
+            for step in range(24):
+                if total_steps >= 1000:
+                    break
+                s = state.to_array()
+                a = agent.select_action(s, training=True)
+                action = ControlAction.from_index(a)
+                ns, r = sim.step(action)
+                ns_arr = ns.to_array()
+                done = step >= 23
+
+                phi_s = sim.potential(state)
+                phi_s_prime = sim.potential(ns)
+                shaped_r = r + agent.gamma * phi_s_prime - phi_s
+
+                agent.store_transition(s, a, shaped_r, ns_arr, done)
+                agent.train_step()
+
+                temp_history.append(ns.temperature)
+                state = ns
+                total_steps += 1
+
+            if total_steps >= 1000:
+                break
+
+        assert total_steps >= 1000, f"应完成至少1000步，实际 {total_steps}"
+
+        last_200 = temp_history[-200:]
+        first_200 = temp_history[:200]
+        avg_last = sum(last_200) / len(last_200)
+        avg_first = sum(first_200) / len(first_200)
+        std_last = (sum((x - avg_last) ** 2 for x in last_200) / len(last_200)) ** 0.5
+        std_first = (sum((x - avg_first) ** 2 for x in first_200) / len(first_200)) ** 0.5
+
+        ideal_temp = 20.0
+        dev_last = abs(avg_last - ideal_temp)
+        dev_first = abs(avg_first - ideal_temp)
+
+        assert dev_last <= dev_first + 2, \
+            f"后期温度偏差 {dev_last:.1f}°C 不应比前期 {dev_first:.1f}°C 差太多"
+        assert std_last <= std_first * 2.0, \
+            f"后期温度标准差 {std_last:.2f} 不应大幅高于前期 {std_first:.2f}"
+
+    def test_shaped_reward_signals_dense(self):
+        agent = DQNAgent(batch_size=1)
+        sim = TentClimateSimulator({"temperature": 35, "humidity": 75, "light": 700, "aw": 0.65})
+
+        state = sim.reset()
+        phi_s = sim.potential(state)
+
+        good_action = ControlAction(ventilation=2, shading=1, humidifier=0)
+        bad_action = ControlAction(ventilation=0, shading=0, humidifier=1)
+
+        ns_good, r_good = sim.step(good_action)
+        phi_good = sim.potential(ns_good)
+        shaped_good = r_good + agent.gamma * phi_good - phi_s
+
+        sim.reset()
+        state2 = sim.reset()
+        phi_s2 = sim.potential(state2)
+        ns_bad, r_bad = sim.step(bad_action)
+        phi_bad = sim.potential(ns_bad)
+        shaped_bad = r_bad + agent.gamma * phi_bad - phi_s2
+
+        assert shaped_good > shaped_bad, f"好动作塑形奖励 {shaped_good:.3f} 应大于坏动作 {shaped_bad:.3f}"

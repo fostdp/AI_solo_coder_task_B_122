@@ -37,6 +37,7 @@ class HerbProperties:
     meridians: List[str]
     efficacy: List[str]
     category: str
+    toxicity: str = "无毒"
 
 
 @dataclass
@@ -53,21 +54,28 @@ class SubstituteRecommendation:
 
 
 KNOWLEDGE_GRAPH_NODES: Dict[str, HerbProperties] = {
-    "当归": HerbProperties("当归", "温", ["甘", "辛"], ["肝", "心", "脾"], ["补血活血", "调经止痛", "润肠通便"], "补血药"),
-    "大黄": HerbProperties("大黄", "寒", ["苦"], ["脾", "胃", "大肠", "肝", "心"], ["泻下攻积", "清热泻火", "凉血解毒", "逐瘀通经"], "泻下药"),
-    "甘草": HerbProperties("甘草", "平", ["甘"], ["心", "肺", "脾", "胃"], ["补脾益气", "清热解毒", "祛痰止咳", "缓急止痛", "调和诸药"], "补气药"),
-    "黄芪": HerbProperties("黄芪", "微温", ["甘"], ["脾", "肺"], ["补气升阳", "固表止汗", "利水消肿", "生津养血"], "补气药"),
-    "白术": HerbProperties("白术", "温", ["苦", "甘"], ["脾", "胃"], ["健脾益气", "燥湿利水", "止汗", "安胎"], "补气药"),
-    "茯苓": HerbProperties("茯苓", "平", ["甘", "淡"], ["心", "肺", "脾", "肾"], ["利水渗湿", "健脾", "宁心"], "利水渗湿药"),
-    "川芎": HerbProperties("川芎", "温", ["辛"], ["肝", "胆", "心包"], ["活血行气", "祛风止痛"], "活血化瘀药"),
-    "白芍": HerbProperties("白芍", "微寒", ["苦", "酸"], ["肝", "脾"], ["养血调经", "敛阴止汗", "柔肝止痛", "平抑肝阳"], "补血药"),
-    "熟地": HerbProperties("熟地", "微温", ["甘"], ["肝", "肾"], ["补血滋阴", "益精填髓"], "补血药"),
-    "桂枝": HerbProperties("桂枝", "温", ["辛", "甘"], ["心", "肺", "膀胱"], ["发汗解肌", "温通经脉", "助阳化气"], "解表药"),
-    "麻黄": HerbProperties("麻黄", "温", ["辛", "微苦"], ["肺", "膀胱"], ["发汗解表", "宣肺平喘", "利水消肿"], "解表药"),
-    "细辛": HerbProperties("细辛", "温", ["辛"], ["肺", "肾"], ["祛风散寒", "通窍止痛", "温肺化饮"], "解表药"),
-    "人参": HerbProperties("人参", "微温", ["甘", "微苦"], ["脾", "肺", "心", "肾"], ["大补元气", "补脾益肺", "生津养血", "安神益智"], "补气药"),
-    "丹参": HerbProperties("丹参", "微寒", ["苦"], ["心", "心包", "肝"], ["活血祛瘀", "通经止痛", "清心除烦", "凉血消痈"], "活血化瘀药"),
-    "五味子": HerbProperties("五味子", "温", ["酸", "甘"], ["肺", "心", "肾"], ["收敛固涩", "益气生津", "补肾宁心"], "收涩药"),
+    "当归": HerbProperties("当归", "温", ["甘", "辛"], ["肝", "心", "脾"], ["补血活血", "调经止痛", "润肠通便"], "补血药", "无毒"),
+    "大黄": HerbProperties("大黄", "寒", ["苦"], ["脾", "胃", "大肠", "肝", "心"], ["泻下攻积", "清热泻火", "凉血解毒", "逐瘀通经"], "泻下药", "有毒"),
+    "甘草": HerbProperties("甘草", "平", ["甘"], ["心", "肺", "脾", "胃"], ["补脾益气", "清热解毒", "祛痰止咳", "缓急止痛", "调和诸药"], "补气药", "无毒"),
+    "黄芪": HerbProperties("黄芪", "微温", ["甘"], ["脾", "肺"], ["补气升阳", "固表止汗", "利水消肿", "生津养血"], "补气药", "无毒"),
+    "白术": HerbProperties("白术", "温", ["苦", "甘"], ["脾", "胃"], ["健脾益气", "燥湿利水", "止汗", "安胎"], "补气药", "无毒"),
+    "茯苓": HerbProperties("茯苓", "平", ["甘", "淡"], ["心", "肺", "脾", "肾"], ["利水渗湿", "健脾", "宁心"], "利水渗湿药", "无毒"),
+    "川芎": HerbProperties("川芎", "温", ["辛"], ["肝", "胆", "心包"], ["活血行气", "祛风止痛"], "活血化瘀药", "无毒"),
+    "白芍": HerbProperties("白芍", "微寒", ["苦", "酸"], ["肝", "脾"], ["养血调经", "敛阴止汗", "柔肝止痛", "平抑肝阳"], "补血药", "无毒"),
+    "熟地": HerbProperties("熟地", "微温", ["甘"], ["肝", "肾"], ["补血滋阴", "益精填髓"], "补血药", "无毒"),
+    "桂枝": HerbProperties("桂枝", "温", ["辛", "甘"], ["心", "肺", "膀胱"], ["发汗解肌", "温通经脉", "助阳化气"], "解表药", "无毒"),
+    "麻黄": HerbProperties("麻黄", "温", ["辛", "微苦"], ["肺", "膀胱"], ["发汗解表", "宣肺平喘", "利水消肿"], "解表药", "小毒"),
+    "细辛": HerbProperties("细辛", "温", ["辛"], ["肺", "肾"], ["祛风散寒", "通窍止痛", "温肺化饮"], "解表药", "小毒"),
+    "人参": HerbProperties("人参", "微温", ["甘", "微苦"], ["脾", "肺", "心", "肾"], ["大补元气", "补脾益肺", "生津养血", "安神益智"], "补气药", "无毒"),
+    "丹参": HerbProperties("丹参", "微寒", ["苦"], ["心", "心包", "肝"], ["活血祛瘀", "通经止痛", "清心除烦", "凉血消痈"], "活血化瘀药", "无毒"),
+    "五味子": HerbProperties("五味子", "温", ["酸", "甘"], ["肺", "心", "肾"], ["收敛固涩", "益气生津", "补肾宁心"], "收涩药", "无毒"),
+}
+
+TOXICITY_WEIGHTS: Dict[str, float] = {
+    "无毒": 1.0,
+    "小毒": 0.5,
+    "有毒": 0.1,
+    "大毒": 0.0,
 }
 
 EDGE_TYPES = {
@@ -183,9 +191,16 @@ class HerbKnowledgeGraph:
 
                 neighbor_node = self.get_node(neighbor)
                 if neighbor_node and neighbor != herb_name:
+                    if neighbor_node.toxicity in ["有毒", "大毒"]:
+                        continue
+                    toxic_weight = TOXICITY_WEIGHTS.get(neighbor_node.toxicity, 0.0)
+                    if toxic_weight <= 0:
+                        continue
+                    new_score *= toxic_weight
+
                     if neighbor not in candidates or candidates[neighbor][0] < new_score:
                         candidates[neighbor] = (
-                            new_score, new_depth, effective_path, shared_eff
+                            new_score, new_depth, effective_path, shared_eff, neighbor_node.toxicity
                         )
 
                 if new_depth < max_depth:
@@ -195,7 +210,7 @@ class HerbKnowledgeGraph:
                     ))
 
         results = []
-        for herb, (score, depth, p_type, shared_eff) in sorted(
+        for herb, (score, depth, p_type, shared_eff, toxicity) in sorted(
             candidates.items(), key=lambda x: -x[1][0]
         )[:top_k]:
             orig_node = self._nodes.get(herb_name)
@@ -204,7 +219,7 @@ class HerbKnowledgeGraph:
             if orig_node and sub_node:
                 shared_mer = list(set(orig_node.meridians) & set(sub_node.meridians))
 
-            notes = self._generate_notes(herb_name, herb, p_type, shared_eff)
+            notes = self._generate_notes(herb_name, herb, p_type, shared_eff, toxicity)
 
             avail_tents = []
             if available_herbs:
@@ -232,7 +247,8 @@ class HerbKnowledgeGraph:
         return list(set(node_a.efficacy) & set(node_b.efficacy))
 
     def _generate_notes(
-        self, original: str, substitute: str, path_type: str, shared: List[str]
+        self, original: str, substitute: str, path_type: str, shared: List[str],
+        toxicity: str = "无毒",
     ) -> str:
         orig_node = self._nodes.get(original)
         sub_node = self._nodes.get(substitute)
@@ -253,6 +269,9 @@ class HerbKnowledgeGraph:
         if orig_node and sub_node:
             if orig_node.nature != sub_node.nature:
                 parts.append(f"注意: 药性从{orig_node.nature}变为{sub_node.nature}")
+
+        if toxicity != "无毒":
+            parts.append(f"⚠️ 本品{toxicity}，需遵医嘱慎用")
 
         return "；".join(parts) if parts else "可作替代"
 
