@@ -155,6 +155,12 @@ from services.climate_control.dqn_controller import ClimateControlService
 from services.route_impact.analyzer import RouteImpactService
 from services.api_gateway.v3_router import init_services as init_v3
 
+# [v3 重构] 独立子应用
+from subapps.allocation_app.main import init_service as init_allocation_app
+from subapps.substitute_app.main import init_service as init_substitute_app
+from subapps.climate_app.main import init_service as init_climate_app
+from subapps.route_app.main import init_service as init_route_app
+
 BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 
@@ -259,6 +265,16 @@ async def lifespan(app: FastAPI):
         route_svc=v3_services.get("route"),
     )
 
+    # [v3 重构] 初始化独立子应用
+    if v3_services.get("allocation"):
+        init_allocation_app(v3_services["allocation"])
+    if v3_services.get("herb"):
+        init_substitute_app(v3_services["herb"])
+    if v3_services.get("climate"):
+        init_climate_app(v3_services["climate"])
+    if v3_services.get("route"):
+        init_route_app(v3_services["route"])
+
     yield
 
     for name, svc in reversed(list(_services.items())):
@@ -281,6 +297,17 @@ app.add_middleware(PrometheusMiddleware)
 
 from services.api_gateway.v3_router import router as v3_router
 app.include_router(v3_router)
+
+# [v3 重构] 挂载独立子应用
+from subapps.allocation_app.main import app as allocation_app
+from subapps.substitute_app.main import app as substitute_app
+from subapps.climate_app.main import app as climate_app
+from subapps.route_app.main import app as route_app
+
+app.mount("/api/v3/allocation", allocation_app)
+app.mount("/api/v3/herb", substitute_app)
+app.mount("/api/v3/climate", climate_app)
+app.mount("/api/v3/route", route_app)
 
 if FRONTEND_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
