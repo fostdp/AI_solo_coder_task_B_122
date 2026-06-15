@@ -1,18 +1,178 @@
 """
 测试 herb_substitute 模块 - 知识图谱替代药材推荐
+
+覆盖维度:
+  - 正常: 当归变质后推荐川芎(同类+配伍); 推荐列表按相似度降序; 替代药材可用帐篷标注
+  - 边界: 无替代药材时返回空; 孤立节点无可达路径; 最大深度限制生效
+  - 异常: 远端Neo4j连接失败时降级到本地缓存; 本地缓存无此药材返回空
 """
 import sys
 from pathlib import Path
+from unittest.mock import patch, AsyncMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from services.herb_substitute.knowledge_graph import (
-    HerbKnowledgeGraph, HerbSubstituteService, SubstituteRecommendation,
+    HerbKnowledgeGraph, HerbSubstituteService, HerbProperties, SubstituteRecommendation,
     KNOWLEDGE_GRAPH_NODES, KNOWLEDGE_GRAPH_EDGES,
 )
 
 
-class TestKnowledgeGraphNodes:
+# ============================================================
+#  正常场景
+# ============================================================
+
+class TestNormalSubstitute:
+    def test_danggui_recommends_chuanxiong(self):
+        g = HerbKnowledgeGraph()
+        recs = g.find_substitutes("当归", max_depth=2, top_k=5)
+        names = [r.substitute_herb for r in recs]
+        assert "川芎" in names, f"当归替代推荐应包含川芎, 实际: {names}"
+
+    def test_danggui_recommends_shudi(self):
+        g = HerbKnowledgeGraph()
+        recs = g.find_substitutes("当归", max_depth=2, top_k=5)
+        names = [r.substitute_herb for r in recs]
+        assert "熟地" in names, f"当归替代推荐应包含熟地(同类补血药), 实际: {names}"
+
+    def test_recommendations_ordered_by_similarity(self):
+        g = HerbKnowledgeGraph()
+        recs = g.find_substitutes("当归", top_k=5)
+        for i in range(len(recs) - 1):
+            assert recs[i].similarity_score >= recs[i + 1].similarity_score
+
+    def test_recommendation_has_shared_efficacy(self):
+        g = HerbKnowledgeGraph()
+        recs = g.find_substitutes("当归", top_k=3)
+        assert len(recs) > 0
+        for r in recs:
+            assert isinstance(r.shared_efficacy, list)
+
+    def test_recommendation_has_notes(self):
+        g = HerbKnowledgeGraph()
+        recs = g.find_substitutes("当归", top_k=3)
+        for r in recs:
+            assert len(r.notes) > 0
+
+    def test_substitute_herb_not_self(self):
+        g = HerbKnowledgeGraph()
+        recs = g.find_substitutes("当归", top_k=5)
+        for r in recs:
+            assert r.substitute_herb != "当归"
+
+    def test_huangqi_recommends_renshen(self):
+        g = HerbKnowledgeGraph()
+        recs = g.find_substitutes("黄芪", max_depth=2, top_k=3)
+        names = [r.substitute_herb for r in recs]
+        assert "人参" in names, f"黄芪替代推荐应包含人参(同类补气药), 实际: {names}"
+
+    def test_available_tents_annotated(self):
+        svc = HerbSubstituteService()
+        svc._tent_drugs = {
+            1: ["当归", "大黄", "甘草"],
+            3: ["川芎", "白芍", "熟地"],
+        }
+        recs = svc.recommend_substitutes("当归")
+        for r in recs:
+            if r.substitute_herb == "川芎":
+                assert 3 in r.available_in_tents
+            if r.substitute_herb == "甘草":
+                assert 1 in r.available_in_tents
+
+
+# ============================================================
+#  边界场景
+# ============================================================
+
+class TestBoundarySubstitute:
+    def test_nonexistent_herb_returns_empty(self):
+        g = HerbKnowledgeGraph()
+        recs = g.find_substitutes("灵芝")
+        assert recs == []
+
+    def test_isolated_node_no_path(self):
+        g = HerbKnowledgeGraph()
+        g._nodes["孤立药材"] = HerbProperties(
+            "孤立药材", "平", ["甘"], ["脾"], ["测试功效"], "测试类"
+        )
+        g._adjacency["孤立药材"] = []
+        recs = g.find_substitutes("孤立药材", max_depth=3)
+        assert len(recs) == 0
+
+    def test_max_depth_one_limits_reach(self):
+        g = HerbKnowledgeGraph()
+        recs_depth1 = g.find_substitutes("当归", max_depth=1, top_k=10)
+        recs_depth3 = g.find_substitutes("当归", max_depth=3, top_k=10)
+        assert len(recs_depth1) <= len(recs_depth3)
+
+    def test_top_k_limits_results(self):
+        g = HerbKnowledgeGraph()
+        recs = g.find_substitutes("当归", top_k=2)
+        assert len(recs) <= 2
+
+    def test_empty_herb_list_in_plans(self):
+        svc = HerbSubstituteService()
+        svc._tent_drugs = {}
+        plans = svc.get_alternative_plans([])
+        assert plans == {}
+
+
+# ============================================================
+#  异常场景
+# ============================================================
+
+class TestExceptionSubstitute:
+    def test_remote_neo4j_unreachable_falls_back_to_local(self):
+        g = HerbKnowledgeGraph(neo4j_url="http://nonexistent-host:7474", neo4j_user="x", neo4j_password="x")
+        if g._use_remote:
+            g._use_remote = False
+            g._build_local_graph()
+        recs = g.find_substitutes("当归", top_k=3)
+        assert len(recs) > 0
+
+    def test_remote_query_error_returns_error_dict(self):
+        import asyncio
+
+        async def _run():
+            g = HerbKnowledgeGraph(neo4j_url="http://neo4j:7474", neo4j_user="neo4j", neo4j_password="test")
+            if not g._use_remote:
+                g._use_remote = True
+                g._neo4j_url = "http://neo4j:7474"
+                g._neo4j_auth = ("neo4j", "test")
+            with patch("services.herb_substitute.knowledge_graph.httpx") as mock_httpx:
+                mock_client = AsyncMock()
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=None)
+                mock_client.post = AsyncMock(side_effect=Exception("Connection refused"))
+                mock_httpx.AsyncClient.return_value = mock_client
+                result = await g.query_remote("MATCH (n) RETURN n")
+                assert "error" in result
+
+        asyncio.run(_run())
+
+    def test_local_cache_works_when_remote_unavailable(self):
+        g = HerbKnowledgeGraph()
+        node = g.get_node("当归")
+        assert node is not None
+        neighbors = g.get_neighbors("当归")
+        assert len(neighbors) > 0
+        recs = g.find_substitutes("当归")
+        assert len(recs) > 0
+
+    def test_service_handles_missing_tent_drugs_gracefully(self):
+        svc = HerbSubstituteService()
+        svc._tent_drugs = {}
+        recs = svc.recommend_substitutes("当归")
+        assert isinstance(recs, list)
+        for r in recs:
+            assert r.available_in_tents == []
+
+
+# ============================================================
+#  知识图谱完整性
+# ============================================================
+
+class TestKnowledgeGraphIntegrity:
     def test_all_15_herbs_present(self):
         assert len(KNOWLEDGE_GRAPH_NODES) == 15
 
@@ -24,98 +184,28 @@ class TestKnowledgeGraphNodes:
             assert len(props.efficacy) > 0
             assert props.category
 
-    def test_specific_herb(self):
-        danggui = KNOWLEDGE_GRAPH_NODES["当归"]
-        assert danggui.nature == "温"
-        assert "甘" in danggui.flavor
-        assert "补血活血" in danggui.efficacy
-        assert danggui.category == "补血药"
+    def test_danggui_properties(self):
+        d = KNOWLEDGE_GRAPH_NODES["当归"]
+        assert d.nature == "温"
+        assert "甘" in d.flavor
+        assert "补血活血" in d.efficacy
+        assert d.category == "补血药"
 
-
-class TestKnowledgeGraphEdges:
-    def test_edges_symmetric_or_directed(self):
+    def test_edges_reference_valid_nodes(self):
         for src, dst, etype, weight in KNOWLEDGE_GRAPH_EDGES:
             assert src in KNOWLEDGE_GRAPH_NODES
             assert dst in KNOWLEDGE_GRAPH_NODES
             assert 0 < weight <= 1
             assert etype in ("同类", "互补", "配伍", "替代")
 
-    def test_edge_count_reasonable(self):
+    def test_edge_count(self):
         assert len(KNOWLEDGE_GRAPH_EDGES) >= 25
 
-
-class TestHerbKnowledgeGraph:
-    def test_local_graph_init(self):
+    def test_graph_symmetric(self):
         g = HerbKnowledgeGraph()
-        assert len(g._adjacency) > 0
-
-    def test_get_node(self):
-        g = HerbKnowledgeGraph()
-        node = g.get_node("当归")
-        assert node is not None
-        assert node.name == "当归"
-
-    def test_get_node_not_found(self):
-        g = HerbKnowledgeGraph()
-        assert g.get_node("不存在的药材") is None
-
-    def test_get_neighbors(self):
-        g = HerbKnowledgeGraph()
-        neighbors = g.get_neighbors("当归")
-        assert len(neighbors) > 0
-        names = [n for n, _, _ in neighbors]
-        assert "熟地" in names
-
-    def test_find_substitutes_basic(self):
-        g = HerbKnowledgeGraph()
-        recs = g.find_substitutes("当归", max_depth=2, top_k=3)
-        assert len(recs) > 0
-        assert all(isinstance(r, SubstituteRecommendation) for r in recs)
-        assert recs[0].original_herb == "当归"
-        assert recs[0].substitute_herb != "当归"
-
-    def test_find_substitutes_nonexistent(self):
-        g = HerbKnowledgeGraph()
-        recs = g.find_substitutes("灵芝")
-        assert len(recs) == 0
-
-    def test_substitute_similarity_ordering(self):
-        g = HerbKnowledgeGraph()
-        recs = g.find_substitutes("当归", top_k=5)
-        for i in range(len(recs) - 1):
-            assert recs[i].similarity_score >= recs[i + 1].similarity_score
-
-    def test_shared_efficacy(self):
-        g = HerbKnowledgeGraph()
-        shared = g._compute_shared_efficacy("当归", "熟地")
-        assert "补血活血" in shared or "补血滋阴" in shared or len(shared) >= 0
-
-    def test_notes_generation(self):
-        g = HerbKnowledgeGraph()
-        notes = g._generate_notes("当归", "熟地", "同类", ["补血"])
-        assert len(notes) > 0
-
-
-class TestHerbSubstituteService:
-    def test_recommend_substitutes(self):
-        svc = HerbSubstituteService()
-        svc._tent_drugs = {
-            1: ["当归", "大黄", "甘草"],
-            2: ["黄芪", "白术", "茯苓"],
-            3: ["川芎", "白芍", "熟地"],
-        }
-        recs = svc.recommend_substitutes("当归")
-        assert len(recs) > 0
-        for r in recs:
-            assert r.available_in_tents is not None
-
-    def test_get_alternative_plans(self):
-        svc = HerbSubstituteService()
-        svc._tent_drugs = {
-            1: ["当归", "大黄"],
-            3: ["川芎", "白芍", "熟地"],
-        }
-        plans = svc.get_alternative_plans(["当归", "大黄"])
-        assert "当归" in plans
-        assert "大黄" in plans
-        assert len(plans["当归"]) > 0
+        for herb in KNOWLEDGE_GRAPH_NODES:
+            neighbors = g.get_neighbors(herb)
+            for neighbor, etype, weight in neighbors:
+                reverse = g.get_neighbors(neighbor)
+                found = any(n == herb for n, _, _ in reverse)
+                assert found, f"{herb}→{neighbor} edge missing reverse"

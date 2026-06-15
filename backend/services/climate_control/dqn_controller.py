@@ -347,10 +347,23 @@ class ClimateControlService:
         if not self._trained:
             self.pretrain(episodes=100)
 
-        action_idx = self._agent.select_action(state_arr, training=False)
-        action = ControlAction.from_index(action_idx)
+        try:
+            action_idx = self._agent.select_action(state_arr, training=False)
+            action = ControlAction.from_index(action_idx)
 
-        next_state, expected_reward = sim.step(action, dt_hours=1.0)
+            next_state, expected_reward = sim.step(action, dt_hours=1.0)
+
+            if expected_reward < 0.05:
+                action = self._rule_based_fallback(state)
+                sim.reset(climate)
+                next_state, expected_reward = sim.step(action, dt_hours=1.0)
+                logger.info("DQN reward low (%.3f), using rule-based fallback for tent %d",
+                            expected_reward, tent_id)
+        except Exception as e:
+            logger.warning("DQN recommend failed for tent %d: %s, using rule-based", tent_id, e)
+            action = self._rule_based_fallback(state)
+            sim.reset(climate)
+            next_state, expected_reward = sim.step(action, dt_hours=1.0)
 
         base_shelf = self._estimate_shelf_life(climate)
         projected_climate = {
@@ -371,6 +384,26 @@ class ClimateControlService:
             shelf_life_improvement_days=round(improvement, 1),
             description=action.describe(),
         )
+
+    def _rule_based_fallback(self, state: ClimateState) -> ControlAction:
+        vent = 0
+        shade = 0
+        humid = 0
+
+        if state.temperature > 25:
+            vent = 2
+        elif state.temperature > 20:
+            vent = 1
+
+        if state.light > 500:
+            shade = 1
+
+        if state.aw < 0.4:
+            humid = 1
+        elif state.aw > 0.6:
+            vent = min(2, vent + 1)
+
+        return ControlAction(ventilation=vent, shading=shade, humidifier=humid)
 
     def _estimate_shelf_life(self, climate: Dict[str, float]) -> float:
         temp = climate.get("temperature", 25)

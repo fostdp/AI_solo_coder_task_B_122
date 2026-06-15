@@ -213,10 +213,31 @@ class RouteImpactAnalyzer:
             if wp is None:
                 continue
             climate = wp.get_climate(season)
-            temps.append(climate["temperature"])
-            hums.append(climate["humidity"])
-            aws.append(climate.get("aw", 0.45))
-            lights.append(climate.get("light", 300))
+            temp = climate.get("temperature")
+            hum = climate.get("humidity")
+            aw_val = climate.get("aw", 0.45)
+            light_val = climate.get("light", 300)
+
+            if temp is not None:
+                temps.append(temp)
+            if hum is not None:
+                hums.append(hum)
+            aws.append(aw_val)
+            lights.append(light_val)
+
+        self._interpolate_missing(temps)
+        self._interpolate_missing(hums)
+        self._interpolate_missing(aws)
+        self._interpolate_missing(lights)
+
+        if not temps:
+            temps = self._default_temperature_band(route, season)
+        if not hums:
+            hums = [50.0]
+        if not aws:
+            aws = [0.45]
+        if not lights:
+            lights = [300.0]
 
         if not temps:
             return RouteExposure(
@@ -396,6 +417,57 @@ class RouteImpactAnalyzer:
             })
 
         return heatmap
+
+    @staticmethod
+    def _interpolate_missing(values: list):
+        if not values:
+            return
+        n = len(values)
+        first_valid = None
+        last_valid = None
+        for i in range(n):
+            if values[i] is not None:
+                first_valid = i
+                break
+        for i in range(n - 1, -1, -1):
+            if values[i] is not None:
+                last_valid = i
+                break
+        if first_valid is None:
+            return
+
+        fill_val = values[first_valid]
+        for i in range(first_valid):
+            values[i] = fill_val
+        fill_val = values[last_valid]
+        for i in range(last_valid + 1, n):
+            values[i] = fill_val
+
+        left = None
+        for i in range(n):
+            if values[i] is not None:
+                left = i
+            elif left is not None:
+                right = None
+                for j in range(i + 1, n):
+                    if values[j] is not None:
+                        right = j
+                        break
+                if right is not None:
+                    frac = (i - left) / (right - left)
+                    values[i] = values[left] + frac * (values[right] - values[left])
+                    left = i
+
+    @staticmethod
+    def _default_temperature_band(route: Route, season: Season) -> List[float]:
+        band = {
+            Season.SPRING: 15.0,
+            Season.SUMMER: 28.0,
+            Season.AUTUMN: 12.0,
+            Season.WINTER: -5.0,
+        }
+        base = band.get(season, 15.0)
+        return [base] * len(route.waypoints)
 
 
 class RouteImpactService:
